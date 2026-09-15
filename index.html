@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>🔬 ESE N-Lens Interactive</title>
+<title>🔬 ESE N-Lens Multi-Frequency Interactive</title>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -147,10 +147,10 @@
 <body>
 <div class="container">
   <div class="header">
-    <h1>🔬 ESE N-Lens — Interactive</h1>
+    <h1>🔬 ESE N-Lens — Multi-Frequency Interactive</h1>
     <p class="subtitle">
       Monte Carlo ray shooting · N gaussian lenses · α ∝ ν⁻², σ_source ∝ ν⁻¹<br>
-      <small>Config A: all z = 0 · Config B: z₂ > 0 (меняется слайдером z у линзы 2+)</small>
+      <small>Config A: all z = 0 · Config B: z₂ > 0 · ν ∈ {0.5, 1.0, 2.0} от nu_ref</small>
     </p>
   </div>
 
@@ -166,7 +166,10 @@
       <label>
         <input type="checkbox" id="showEnsemble" checked>
         Показывать ансамбль лучей (σ_source)
-        <span class="hint">— оранжевые лучи с реальным разбросом источника</span>
+      </label>
+      <label>
+        <input type="checkbox" id="showMultiFreq" checked>
+        Многочастотность (ν = 0.5, 1.0, 2.0 · ν_ref)
       </label>
     </div>
 
@@ -174,6 +177,10 @@
       <div class="slider-group">
         <label>sigma_source <span class="val" id="sigma-v">1.00</span></label>
         <input type="range" id="sigma" min="0.1" max="3" step="0.05" value="1.0">
+      </div>
+      <div class="slider-group">
+        <label>nu_ref <span class="val" id="nuref-v">1.00</span></label>
+        <input type="range" id="nuref" min="0.5" max="4" step="0.1" value="1.0">
       </div>
       <div class="slider-group">
         <label>num_rays <span class="val" id="nrays-v">200</span></label>
@@ -190,10 +197,6 @@
       <div class="slider-group">
         <label>noise_level <span class="val" id="noise-v">0.05</span></label>
         <input type="range" id="noise" min="0" max="0.3" step="0.01" value="0.05">
-      </div>
-      <div class="slider-group">
-        <label>v (скорость) <span class="val" id="v-v">0.50</span></label>
-        <input type="range" id="v" min="0.05" max="2" step="0.05" value="0.5">
       </div>
     </div>
     <div class="status" id="status">Готово</div>
@@ -212,14 +215,15 @@
 // ============================================================
 // КОНСТАНТЫ МОДЕЛИ (как в Python)
 // ============================================================
-const NU_REF = 1.0;
-const NU     = 1.0;    // одна частота
+const NU_LIST = [0.5, 1.0, 2.0];
+const NU_COLORS = ['green', 'blue', 'red'];
 const T_MAX  = 60.0;
+const V_FIXED = 0.5;
 const NUM_POINTS = 40;
 const RANDOM_SEED = 42;
 
-const NUM_BETA = 4000;   // оптимизация под браузер (в Python 10000)
-const NUM_U    = 600;    // (в Python 1000)
+const NUM_BETA = 4000;
+const NUM_U    = 600;
 const NUM_BINS = 200;
 
 const RAY_SEED = 777;
@@ -260,7 +264,7 @@ function autoURange(lenses, sigmaEff, nuRef, nu, nSigma = 5) {
 }
 
 // ============================================================
-// ЯДРО: compute_ese_multi (точный порт Python)
+// ЯДРО: compute_ese_multi (многочастотная версия)
 // ============================================================
 function computeEseMulti(lenses, sigmaSource, nu, nuRef,
                          uRange, uPrimeRange,
@@ -268,10 +272,7 @@ function computeEseMulti(lenses, sigmaSource, nu, nuRef,
   const alphaScale = Math.pow(nuRef / nu, 2);
   const sigmaEff   = sigmaSource * Math.pow(nuRef / nu, 1);
 
-  // Копия + сортировка по z
   let lensesSorted = lenses.map(l => ({...l})).sort((a, b) => a.z - b.z);
-
-  // Если первая не в 0 — сдвигаем всё
   if (Math.abs(lensesSorted[0].z) > 1e-12) {
     const zShift = lensesSorted[0].z;
     lensesSorted.forEach(l => l.z -= zShift);
@@ -282,12 +283,10 @@ function computeEseMulti(lenses, sigmaSource, nu, nuRef,
 
   const u0 = linspace(uRange[0], uRange[1], numU);
 
-  // Плоские массивы (numBeta * numU)
   const N = numBeta * numU;
   const uCurrent  = new Float64Array(N);
   const totalDefl = new Float64Array(N);
 
-  // Инициализация: u0 повторяется numBeta раз
   for (let k = 0; k < numBeta; k++) {
     const off = k * numU;
     for (let i = 0; i < numU; i++) uCurrent[off + i] = u0[i];
@@ -317,7 +316,6 @@ function computeEseMulti(lenses, sigmaSource, nu, nuRef,
 
   const dzFinal = 1.0 - zPrev;
 
-  // Гистограммы
   const bins = linspace(uPrimeRange[0], uPrimeRange[1], numBins + 1);
   const binW = bins[1] - bins[0];
   const histLensed   = new Float64Array(numBins);
@@ -346,39 +344,42 @@ function computeEseMulti(lenses, sigmaSource, nu, nuRef,
     binCenters[i] = (bins[i] + bins[i + 1]) / 2;
     const hU = histUnlensed[i] / norm;
     const hL = histLensed[i]   / norm;
-    intensity[i] = hU > 0 ? hL / hU : 0;
+    // Как в Python: где unlensed слишком мал — NaN (обрыв)
+    intensity[i] = hU > 1e-6 ? hL / hU : NaN;
   }
 
-  let energy = 0;
-  for (let i = 0; i < numBins; i++) energy += intensity[i] * binW;
+  // Энергия (без учёта NaN)
+  let energy = 0, validCount = 0;
+  for (let i = 0; i < numBins; i++) {
+    if (!isNaN(intensity[i])) {
+      energy += intensity[i] * binW;
+      validCount++;
+    }
+  }
 
-  return { binCenters, intensity, energy };
+  return { binCenters, intensity, energy, validCount };
 }
 
 // ============================================================
-// ТРАССИРОВКА ЛУЧЕЙ ДЛЯ ДИАГРАММЫ (последовательная)
+// ТРАССИРОВКА ЛУЧЕЙ
 // ============================================================
 function traceRays(lensesSorted, uLensArray, alphaScale, useEnsemble, sigmaSource, rng) {
   const numRays = uLensArray.length;
   const zSource = -1.0;
   const zObs = 1.0;
 
-  // Начальные позиции в плоскости источника
   const uStart = new Float64Array(numRays);
   for (let k = 0; k < numRays; k++) {
     const betaS = useEnsemble ? gaussian(rng, sigmaSource) : 0.0;
     uStart[k] = uLensArray[k] + betaS;
   }
 
-  // История: массив {z1, z2, u1, u2} — сегменты между последовательными плоскостями
   const segments = [];
 
   let uCurrent  = Float64Array.from(uStart);
   let totalDefl = new Float64Array(numRays);
   let zPrev = 0.0;
 
-  // Начальный сегмент: от плоскости источника (z = -1) до первой линзы (z = 0)
-  // На этом участке totalDefl = 0, так что u не меняется
   segments.push({
     z1: zSource, z2: 0.0,
     u1: Float64Array.from(uCurrent),
@@ -389,7 +390,6 @@ function traceRays(lensesSorted, uLensArray, alphaScale, useEnsemble, sigmaSourc
     const lens = lensesSorted[i];
     const dz = lens.z - zPrev;
 
-    // Пролёт от zPrev до z_i (если dz > 0)
     if (dz > 0) {
       const uAtLens = new Float64Array(numRays);
       for (let k = 0; k < numRays; k++) {
@@ -403,7 +403,6 @@ function traceRays(lensesSorted, uLensArray, alphaScale, useEnsemble, sigmaSourc
       uCurrent = uAtLens;
     }
 
-    // Отклонение от линзы i
     const alphaI   = lens.alpha * alphaScale;
     const uOffI    = lens.u_offset;
     const aRatioI  = lens.a_ratio || 1.0;
@@ -419,7 +418,6 @@ function traceRays(lensesSorted, uLensArray, alphaScale, useEnsemble, sigmaSourc
     zPrev = lens.z;
   }
 
-  // Финальный полёт до наблюдателя
   const dzFinal = zObs - zPrev;
   const uObs = new Float64Array(numRays);
   for (let k = 0; k < numRays; k++) {
@@ -435,7 +433,7 @@ function traceRays(lensesSorted, uLensArray, alphaScale, useEnsemble, sigmaSourc
 }
 
 // ============================================================
-// ДИАГРАММА ЛУЧЕЙ
+// ДИАГРАММА ЛУЧЕЙ (для опорной частоты)
 // ============================================================
 function buildRayTraces(lenses, sigmaSource, nu, nuRef, numRays,
                         uPlotMin, uPlotMax, binCenters, intensity,
@@ -444,27 +442,23 @@ function buildRayTraces(lenses, sigmaSource, nu, nuRef, numRays,
   const bulgeAmp = 0.05;
   const alphaScale = Math.pow(nuRef / nu, 2);
 
-  // Копия + сортировка
   let lensesSorted = lenses.map(l => ({...l})).sort((a, b) => a.z - b.z);
   if (Math.abs(lensesSorted[0].z) > 1e-12) {
     const zShift = lensesSorted[0].z;
     lensesSorted.forEach(l => l.z -= zShift);
   }
 
-  // Сетка для контуров линз
   const nPlot = 400;
   const uPlot = linspace(uPlotMin, uPlotMax, nPlot);
 
   const traces = [];
 
-  // ---- Слой 1: оранжевый ансамбль (опционально) ----
   if (showEnsemble) {
     const rng = mulberry32(RAY_SEED);
     const uLensArray = linspace(uPlotMin, uPlotMax, numRays);
     const { segments } = traceRays(lensesSorted, uLensArray, alphaScale,
                                    true, sigmaSource, rng);
 
-    // Один трейс на сегмент, чтобы не плодить миллионы трейсов
     for (const seg of segments) {
       const xArr = [], yArr = [];
       for (let k = 0; k < numRays; k++) {
@@ -479,9 +473,8 @@ function buildRayTraces(lenses, sigmaSource, nu, nuRef, numRays,
     }
   }
 
-  // ---- Слой 2: чёрный скелет (beta_s = 0) ----
   {
-    const rng = mulberry32(RAY_SEED);   // не используется по существу, но нужен
+    const rng = mulberry32(RAY_SEED);
     const uLensArray = linspace(uPlotMin, uPlotMax, numRays);
     const { segments } = traceRays(lensesSorted, uLensArray, alphaScale,
                                    false, 0.0, rng);
@@ -500,7 +493,6 @@ function buildRayTraces(lenses, sigmaSource, nu, nuRef, numRays,
     }
   }
 
-  // ---- Линзы ----
   for (let i = 0; i < lensesSorted.length; i++) {
     const lens = lensesSorted[i];
     const aRatioI = lens.a_ratio || 1.0;
@@ -525,7 +517,6 @@ function buildRayTraces(lenses, sigmaSource, nu, nuRef, numRays,
     });
   }
 
-  // ---- Плоскость наблюдателя ----
   traces.push({
     x: [uPlotMin, uPlotMax], y: [zObs, zObs],
     type: 'scatter', mode: 'lines',
@@ -533,18 +524,19 @@ function buildRayTraces(lenses, sigmaSource, nu, nuRef, numRays,
     name: 'Observer'
   });
 
-  // ---- Кривая блеска (отражённая) ----
   if (binCenters && intensity) {
     const xLC = [], yLC = [];
     for (let i = 0; i < binCenters.length; i++) {
       if (binCenters[i] < uPlotMin || binCenters[i] > uPlotMax) continue;
+      if (isNaN(intensity[i])) continue;
       xLC.push(binCenters[i]);
       yLC.push(-0.1 * (intensity[i] - 1) + zObs);
     }
     traces.push({
       x: xLC, y: yLC, type: 'scatter', mode: 'lines',
       line: { color: '#1f77b4', width: 3 },
-      name: 'Light curve (ν_ref)', hoverinfo: 'skip'
+      name: `Light curve (ν_ref=${nuRef.toFixed(2)})`,
+      hoverinfo: 'skip'
     });
   }
 
@@ -552,17 +544,58 @@ function buildRayTraces(lenses, sigmaSource, nu, nuRef, numRays,
 }
 
 // ============================================================
-// КРИВАЯ БЛЕСКА (одна частота + шумовые точки)
+// МНОГОЧАСТОТНАЯ КРИВАЯ БЛЕСКА
 // ============================================================
-function buildLightCurveTraces(result, xlimU, v, uPrime0, noiseLevel) {
+function buildLightCurveTraces(results, nuList, nuRef, xlimU, v, uPrime0,
+                                noiseLevel, showMultiFreq) {
   const traces = [];
 
-  traces.push({
-    x: result.binCenters, y: result.intensity,
-    type: 'scatter', mode: 'lines',
-    line: { color: 'blue', width: 2 },
-    name: 'Model ν = ν_ref'
-  });
+  if (showMultiFreq) {
+    // Сортируем индексы по частоте (для порядка в легенде)
+    const order = [...nuList.keys()].sort((a, b) => nuList[a] - nuList[b]);
+
+    for (const i of order) {
+      const nu = nuList[i];
+      const res = results[i];
+      if (!res) continue;
+      const color = NU_COLORS[i] || 'black';
+
+      let label;
+      if (Math.abs(nu - nuRef) < 1e-9) label = 'ν = ν_ref';
+      else label = `ν = ${nu.toFixed(2)} ν_ref`;
+
+      // NaN разрывает линию (Plotly это понимает как обрыв)
+      const x = [], y = [];
+      for (let k = 0; k < res.binCenters.length; k++) {
+        x.push(res.binCenters[k]);
+        y.push(isNaN(res.intensity[k]) ? null : res.intensity[k]);
+      }
+
+      traces.push({
+        x, y, type: 'scatter', mode: 'lines',
+        line: { color, width: 2 },
+        name: label, opacity: 0.9,
+        connectgaps: false
+      });
+    }
+  } else {
+    // Только опорная частота
+    const idxRef = nuList.indexOf(1.0);
+    const res = results[idxRef] || results[Math.floor(results.length / 2)];
+    if (res) {
+      const x = [], y = [];
+      for (let k = 0; k < res.binCenters.length; k++) {
+        x.push(res.binCenters[k]);
+        y.push(isNaN(res.intensity[k]) ? null : res.intensity[k]);
+      }
+      traces.push({
+        x, y, type: 'scatter', mode: 'lines',
+        line: { color: 'blue', width: 2 },
+        name: 'Model ν = ν_ref',
+        connectgaps: false
+      });
+    }
+  }
 
   traces.push({
     x: [xlimU[0], xlimU[1]], y: [1, 1],
@@ -571,39 +604,45 @@ function buildLightCurveTraces(result, xlimU, v, uPrime0, noiseLevel) {
     name: 'Unlensed'
   });
 
-  // Шумовые точки по опорной частоте
-  const bcRef = result.binCenters;
-  const IRef  = result.intensity;
+  // Шумовые точки — только на опорной частоте
+  const idxRef = nuList.indexOf(1.0);
+  const resRef = results[idxRef];
+  if (resRef) {
+    const bcRef = resRef.binCenters;
+    const IRef  = resRef.intensity;
 
-  const rng = mulberry32(RANDOM_SEED);
-  const tPoints = linspace(0, T_MAX, NUM_POINTS);
-  const upPoints = tPoints.map(t => uPrime0 + v * t);
+    const rng = mulberry32(RANDOM_SEED);
+    const tPoints = linspace(0, T_MAX, NUM_POINTS);
+    const upPoints = tPoints.map(t => uPrime0 + v * t);
 
-  const xObs = [], yObs = [], yErr = [];
-  for (let k = 0; k < NUM_POINTS; k++) {
-    const up = upPoints[k];
-    if (up < xlimU[0] || up > xlimU[1]) continue;
-    let iModel = 0;
-    for (let j = 0; j < bcRef.length - 1; j++) {
-      if (up >= bcRef[j] && up <= bcRef[j + 1]) {
-        const frac = (up - bcRef[j]) / (bcRef[j + 1] - bcRef[j]);
-        iModel = IRef[j] * (1 - frac) + IRef[j + 1] * frac;
-        break;
+    const xObs = [], yObs = [], yErr = [];
+    for (let k = 0; k < NUM_POINTS; k++) {
+      const up = upPoints[k];
+      if (up < xlimU[0] || up > xlimU[1]) continue;
+      let iModel = NaN;
+      for (let j = 0; j < bcRef.length - 1; j++) {
+        if (up >= bcRef[j] && up <= bcRef[j + 1]) {
+          if (isNaN(IRef[j]) || isNaN(IRef[j + 1])) { iModel = NaN; break; }
+          const frac = (up - bcRef[j]) / (bcRef[j + 1] - bcRef[j]);
+          iModel = IRef[j] * (1 - frac) + IRef[j + 1] * frac;
+          break;
+        }
       }
+      if (isNaN(iModel)) continue;
+      const noise = gaussian(rng, noiseLevel);
+      xObs.push(up);
+      yObs.push(iModel + noise);
+      yErr.push(noiseLevel);
     }
-    const noise = gaussian(rng, noiseLevel);
-    xObs.push(up);
-    yObs.push(iModel + noise);
-    yErr.push(noiseLevel);
-  }
 
-  traces.push({
-    x: xObs, y: yObs,
-    error_y: { type: 'data', array: yErr, visible: true, thickness: 0.8 },
-    type: 'scatter', mode: 'markers',
-    marker: { color: 'black', size: 5 },
-    name: 'Simulated data'
-  });
+    traces.push({
+      x: xObs, y: yObs,
+      error_y: { type: 'data', array: yErr, visible: true, thickness: 0.8 },
+      type: 'scatter', mode: 'markers',
+      marker: { color: 'black', size: 5 },
+      name: 'Simulated data'
+    });
+  }
 
   return traces;
 }
@@ -633,14 +672,12 @@ function renderLenses() {
     header.textContent = `Линза ${i + 1}`;
     card.appendChild(header);
 
-    // Кнопка удаления
     const delBtn = document.createElement('button');
     delBtn.className = 'btn-del';
     delBtn.textContent = '×';
     delBtn.disabled = (lenses.length <= 1);
     delBtn.addEventListener('click', () => {
       lenses.splice(i, 1);
-      // Первая линза всегда должна иметь z=0
       if (lenses.length > 0) lenses[0].z = 0;
       renderLenses();
       update();
@@ -650,7 +687,6 @@ function renderLenses() {
     const grid = document.createElement('div');
     grid.className = 'lens-grid';
 
-    // Хелпер для создания слайдера
     function addSlider(key, labelText, min, max, step, disabled = false, fmt = v => v.toFixed(1)) {
       const group = document.createElement('div');
       group.className = 'slider-group';
@@ -680,13 +716,11 @@ function renderLenses() {
       grid.appendChild(group);
     }
 
-    // alpha, u_offset, z, a_ratio
     addSlider('alpha',    'alpha',     1, 50, 0.5);
     addSlider('u_offset', 'u_offset', -20, 20, 0.5);
     addSlider('z', 'z' + (isFirst ? ' (fixed = 0)' : ''),
               0, 0.9, 0.05, isFirst, v => v.toFixed(2));
 
-    // a_ratio — только для 2+ линзы
     if (!isFirst) {
       addSlider('a_ratio', 'a_ratio', 0.5, 3, 0.05, false, v => v.toFixed(2));
     }
@@ -706,20 +740,21 @@ function update() {
   busy = true;
   const t0 = performance.now();
 
-  const sigma      = +document.getElementById('sigma').value;
-  const numRays    = +document.getElementById('nrays').value;
-  const uPlotMin   = +document.getElementById('umin').value;
-  const uPlotMax   = +document.getElementById('umax').value;
-  const noiseLevel = +document.getElementById('noise').value;
-  const v          = +document.getElementById('v').value;
-  const showEns    = document.getElementById('showEnsemble').checked;
+  const sigma        = +document.getElementById('sigma').value;
+  const nuRef        = +document.getElementById('nuref').value;
+  const numRays      = +document.getElementById('nrays').value;
+  const uPlotMin     = +document.getElementById('umin').value;
+  const uPlotMax     = +document.getElementById('umax').value;
+  const noiseLevel   = +document.getElementById('noise').value;
+  const showEns      = document.getElementById('showEnsemble').checked;
+  const showMulti    = document.getElementById('showMultiFreq').checked;
 
   document.getElementById('sigma-v').textContent = sigma.toFixed(2);
+  document.getElementById('nuref-v').textContent = nuRef.toFixed(2);
   document.getElementById('nrays-v').textContent = numRays;
   document.getElementById('umin-v').textContent  = uPlotMin;
   document.getElementById('umax-v').textContent  = uPlotMax;
   document.getElementById('noise-v').textContent = noiseLevel.toFixed(2);
-  document.getElementById('v-v').textContent     = v.toFixed(2);
 
   if (uPlotMin >= uPlotMax) {
     document.getElementById('status').textContent =
@@ -729,39 +764,53 @@ function update() {
     return;
   }
 
-  // Первая линза всегда z = 0
   if (lenses.length > 0) lenses[0].z = 0;
 
-  // Расчёт кривой блеска
-  const rng = mulberry32(12345);
-  const alphaScale = Math.pow(NU_REF / NU, 2);
-  const sigmaEff = sigma * Math.pow(NU_REF / NU, 1);
+  // ---- Общий u_range (как в Python: по самой низкой частоте) ----
+  const nuListActual = showMulti
+    ? NU_LIST.map(nu => nu * nuRef)
+    : [nuRef];
 
-  // Общий диапазон u
+  const nuMin = Math.min(...nuListActual);
+  const sigmaEffMin = sigma * Math.pow(nuRef / nuMin, 1);
+
   const lensesSorted = lenses.map(l => ({...l})).sort((a, b) => a.z - b.z);
-  const uRangeCommon = autoURange(lensesSorted, sigmaEff, NU_REF, NU);
+  const uRangeCommon = autoURange(lensesSorted, sigmaEffMin, nuRef, nuMin);
 
-  const result = computeEseMulti(
-    lenses, sigma, NU, NU_REF,
-    uRangeCommon, uRangeCommon,
-    NUM_BETA, NUM_U, NUM_BINS, rng
-  );
+  // ---- Расчёт для каждой частоты ----
+  const results = [];
+  let maxEnergyDev = 0;
+  const rng = mulberry32(12345);
 
-  // Диапазон x для кривой блеска
+  for (const nu of nuListActual) {
+    const r = computeEseMulti(
+      lenses, sigma, nu, nuRef,
+      uRangeCommon, uRangeCommon,
+      NUM_BETA, NUM_U, NUM_BINS, rng
+    );
+    results.push(r);
+    if (r.validCount > 0) {
+      maxEnergyDev = Math.max(maxEnergyDev, Math.abs(r.energy - 1));
+    }
+  }
+
   const xlimU = [uPlotMin, uPlotMax];
-  const uPrime0 = -v * T_MAX / 2.0;
+  const uPrime0 = -V_FIXED * T_MAX / 2.0;
 
-  // --- Диаграмма лучей ---
+  // ---- Диаграмма лучей (опорная частота) ----
+  const idxRef = nuListActual.indexOf(nuRef);
+  const refResult = results[idxRef] || results[0];
+
   const rayTraces = buildRayTraces(
-    lenses, sigma, NU, NU_REF, numRays,
+    lenses, sigma, nuRef, nuRef, numRays,
     uPlotMin, uPlotMax,
-    result.binCenters, result.intensity,
+    refResult.binCenters, refResult.intensity,
     showEns
   );
 
   const rayLayout = {
     title: {
-      text: `Ray Diagram · ${lenses.length} lens(es) · σ=${sigma.toFixed(2)}`,
+      text: `Ray Diagram · ${lenses.length} lens(es) · σ=${sigma.toFixed(2)} · ν_ref=${nuRef.toFixed(2)}`,
       font: { size: 13 }
     },
     xaxis: {
@@ -779,10 +828,18 @@ function update() {
     plot_bgcolor: 'white'
   };
 
-  // --- Кривая блеска ---
-  const lcTraces = buildLightCurveTraces(result, xlimU, v, uPrime0, noiseLevel);
+  // ---- Кривые блеска ----
+  const lcTraces = buildLightCurveTraces(
+    results, nuListActual, nuRef, xlimU, V_FIXED, uPrime0,
+    noiseLevel, showMulti
+  );
+
+  const lcTitle = showMulti
+    ? 'Light curves · multi-frequency'
+    : 'Light curve · ν = ν_ref';
+
   const lcLayout = {
-    title: { text: 'Light curve · ν = ν_ref', font: { size: 13 } },
+    title: { text: lcTitle, font: { size: 13 } },
     xaxis: { title: "u' (in lens units)", range: xlimU, zeroline: false },
     yaxis: { title: "Normalized Intensity", zeroline: false },
     margin: { l: 60, r: 20, t: 50, b: 50 },
@@ -796,15 +853,15 @@ function update() {
   const dt = (performance.now() - t0).toFixed(0);
   const statusEl = document.getElementById('status');
   const ensState = showEns ? 'ансамбль: вкл' : 'ансамбль: выкл';
-  if (Math.abs(result.energy - 1) > 0.1) {
+  const freqState = showMulti ? `частоты: ${nuListActual.map(n => n.toFixed(2)).join(', ')}` : `частота: ${nuRef.toFixed(2)}`;
+
+  if (maxEnergyDev > 0.1) {
     statusEl.textContent =
-      `⚠ energy = ${result.energy.toFixed(3)} (ожидалось ≈ 1.0) · ` +
-      `${ensState} · пересчёт: ${dt} ms`;
+      `⚠ max |energy − 1| = ${maxEnergyDev.toFixed(3)} · ${ensState} · ${freqState} · ${dt} ms`;
     statusEl.className = 'status warn';
   } else {
     statusEl.textContent =
-      `✓ Пересчёт: ${dt} ms · energy = ${result.energy.toFixed(3)} · ` +
-      `${ensState} · N_beta=${NUM_BETA}, N_u=${NUM_U}, N_bins=${NUM_BINS}`;
+      `✓ Пересчёт: ${dt} ms · max |energy − 1| = ${maxEnergyDev.toFixed(3)} · ${ensState} · ${freqState}`;
     statusEl.className = 'status';
   }
 
@@ -814,10 +871,11 @@ function update() {
 // ============================================================
 // ПОДПИСКИ
 // ============================================================
-['sigma', 'nrays', 'umin', 'umax', 'noise', 'v'].forEach(id => {
+['sigma', 'nuref', 'nrays', 'umin', 'umax', 'noise'].forEach(id => {
   document.getElementById(id).addEventListener('input', update);
 });
 document.getElementById('showEnsemble').addEventListener('change', update);
+document.getElementById('showMultiFreq').addEventListener('change', update);
 
 document.getElementById('addLens').addEventListener('click', () => {
   const i = lenses.length;
